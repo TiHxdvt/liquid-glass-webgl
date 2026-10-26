@@ -259,18 +259,22 @@ function program(gl, fragSrc) {
 }
 
 /**
- * 创建液态玻璃实例。引擎不内置任何背景——背景以全屏片元着色器从外部注入，
- * 引擎渲进背景纹理后做折射采样。
+ * 创建液态玻璃实例。引擎不内置任何背景——背景从外部注入，两种方式：
+ * ① opts.background：全屏片元着色器（GLSL ES 3.0；可声明 uRes uniform 取分辨率、
+ *    uTime uniform（秒）驱动动画）；② setBackground(src)：每帧喂一幅现成画面
+ *   （canvas / ImageBitmap 等 TexImageSource），引擎上传为折射采样源。
  * @param {HTMLCanvasElement} canvas
- * @param {{ background: string }} opts
- *   background: 全屏背景片元着色器（GLSL ES 3.0；可声明 uRes uniform 取分辨率、
- *   uTime uniform（秒）驱动动画）
+ * @param {{ background?: string, transparent?: boolean, nested?: boolean }} opts
+ *   transparent: 三明治模式——画布透明、不铺底，只画玻璃本体+晕，页面真实背景
+ *   从画布透出（DOM 混合模式不受影响）。配合 setBackground 把下方背景喂进来采样
+ *   nested: 重叠玻璃的光学嵌套（上层折射下层），默认关；transparent 模式下不生效
  */
-export function createLiquidGlass(canvas, opts) {
-  const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false });
+export function createLiquidGlass(canvas, opts = {}) {
+  const transparent = !!opts.transparent;
+  const gl = canvas.getContext('webgl2', { antialias: false, alpha: transparent, depth: false });
   if (!gl) throw new Error('需要 WebGL2');
 
-  const bgProg = program(gl, opts.background);
+  const bgProg = opts.background ? program(gl, opts.background) : null;
   const blitProg = program(gl, BLIT_FRAG);
   const glassProg = program(gl, GLASS_FRAG);
   const vao = gl.createVertexArray();
@@ -311,11 +315,13 @@ export function createLiquidGlass(canvas, opts) {
     }
     return out;
   };
-  const bgU = uni(bgProg);
+  const bgU = bgProg ? uni(bgProg) : {};
   const blitU = uni(blitProg);
   const gU = uni(glassProg);
 
-  // 背景着色器声明 uTime 即视为动画背景（逐帧重画）；静态背景只在尺寸变化后画一次
+  // 背景进纹理的两条路：setBackground() 外部喂画面（纹理模式，优先），
+  // 或 background 着色器自渲（声明 uTime = 动画背景逐帧重画，否则只在 resize 后画）
+  let bgTexture = false;
   const bgAnimated = !!bgU.uTime;
   let bgDirty = true;
 
@@ -357,7 +363,8 @@ export function createLiquidGlass(canvas, opts) {
     canvas.width = w;
     canvas.height = h;
     bgDirty = true;
-    for (const t of [bgTex, compTexA, compTexB]) {
+    // 纹理模式下 bgTex 的尺寸由外部喂的源决定，resize 不碰它
+    for (const t of (bgTexture ? [compTexA, compTexB] : [bgTex, compTexA, compTexB])) {
       gl.bindTexture(gl.TEXTURE_2D, t);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     }
@@ -368,6 +375,22 @@ export function createLiquidGlass(canvas, opts) {
         if (!r.x && !r.y) { r.x = w / 2; r.y = h / 2; }
       }
     }
+  }
+
+  /**
+   * 喂背景画面（纹理模式）：src 是任意 TexImageSource（canvas/ImageBitmap…），
+   * 引擎翻转 y（源 y 向下 → gl_FragCoord 的 y 向上）后上传并建 mipmap。
+   * 动画背景每帧调用；分辨率不必与画布一致（按归一化坐标采样）。
+   */
+  function setBackground(src) {
+    if (!src) return;
+    bgTexture = true;
+    gl.bindTexture(gl.TEXTURE_2D, bgTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    bgDirty = false;
   }
 
   /** 铺底：src 纹理原样铺进目标，保住玻璃包围盒以外的画面 */
@@ -425,13 +448,13 @@ export function createLiquidGlass(canvas, opts) {
       && Math.abs(a.y - b.y) * 2 < a.h + b.h + (ra + rb) * 2;
   }
 
-  function frame(now) {
-    raf = requestAnimationFrame(frame);
+  /** 渲一帧（外部驱动入口：接入方把它挂进自己的帧循环）；start() 的内部 rAF 也走这 */
+  function render(now) {
     resize();
 
-    // pass 1：背景进纹理——静态背景只在尺寸变化后重画（含 mipmap 重建，
-    // 磨砂靠 LOD 采样）；动画背景逐帧推 uTime
-    if (bgAnimated || bgDirty) {
+    // pass 1：背景进纹理。纹理模式（setBackground）下由调用方负责；着色器模式下
+    // 静态背景只在尺寸变化后重画（含 mipmap 重建，磨砂靠 LOD 采样），动画背景逐帧推 uTime
+    if (!bgTexture && bgProg && (bgAnimated || bgDirty)) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, bgFbo);
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(bgProg);
@@ -445,12 +468,13 @@ export function createLiquidGlass(canvas, opts) {
     }
 
     // pass 2：合成，两档——
-    // · 单目标叠画（默认；nested 关闭或包围盒互不相交时走这档）：一次铺底 +
-    //   各画各的小框，预乘混合让上层遮挡下层、晕叠在下层之上。零层间税、零 mipmap
-    // · 逐层合成（nested 开启且包围盒相交）：自后向前，上层采样下层的合成结果
-    //   ——重叠处「隔玻璃看玻璃」；每层铺底+小框，中间目标建 mipmap（磨砂要 LOD）
-    let needLayers = false;
-    if (nested) {
+    // · 单目标叠画（默认；transparent / nested 关闭 / 包围盒互不相交时走这档）：
+    //   铺底 + 各画各的小框，预乘混合让上层遮挡下层、晕叠在下层之上。
+    //   transparent 模式不铺底（画布透明、真实页面透出），只画玻璃本体+晕
+    // · 逐层合成（nested 开启、非 transparent、包围盒相交）：自后向前，上层采样
+    //   下层的合成结果——重叠处「隔玻璃看玻璃」；每层铺底+小框
+    let needLayers = nested && !transparent;
+    if (needLayers) {
       for (let i = 0; i < rects.length && !needLayers; i++) {
         for (let j = i + 1; j < rects.length; j++) {
           if (bboxHit(rects[i], rects[j])) { needLayers = true; break; }
@@ -459,9 +483,17 @@ export function createLiquidGlass(canvas, opts) {
     }
 
     if (rects.length === 0) {
-      blit(bgTex, null);
+      if (transparent) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.disable(gl.SCISSOR_TEST);
+        gl.clearColor(0.0, 0.0, 0.0, 0.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      } else {
+        blit(bgTex, null);
+      }
     } else if (!needLayers) {
-      blit(bgTex, null);
+      if (!transparent) blit(bgTex, null);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.enable(gl.BLEND);
@@ -493,9 +525,18 @@ export function createLiquidGlass(canvas, opts) {
     }
   }
 
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    render(now);
+  }
+
   return {
     params,
     rects,
+    /** 喂背景画面（纹理模式）：任意 TexImageSource，动画背景每帧调用 */
+    setBackground,
+    /** 外部驱动渲一帧（挂进自己的帧循环用它，配合 stop() 不开内部 rAF） */
+    render,
     /** 嵌套折射开关：开 = 重叠玻璃逐层合成互相折射；关 = 单目标叠画（更快） */
     get nested() { return nested; },
     set nested(v) { nested = !!v; },
