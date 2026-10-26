@@ -33,6 +33,8 @@ uniform float uDisp;       // 色散
 uniform float uRim;        // 边缘反光强度
 uniform float uFeather;    // 外缘羽化 px：轮廓内外颜色的过渡宽度
 uniform float uEnvProj;    // 环境投影（0/1）：快靠近的元素投影到玻璃上，默认关
+uniform float uPremult;    // 合成模式：1=预乘混合（单目标叠画多块玻璃），0=不透明写（逐层合成）
+uniform float uSrcLod0;    // 采样源无 mipmap（层间合成纹理）时置 1：lod 恒 0，省掉全屏 mipmap 重建
 
 out vec4 outColor;
 
@@ -75,7 +77,8 @@ void main() {
   // 外缘羽化：黑白交界对比度最高，过窄出像素台阶，过宽轮廓发虚。
   float fth = max(uFeather, 0.5);
   if (sd > fth) {
-    outColor = vec4(base, 1.0);
+    // 预乘模式：底上已经有画面（下层玻璃/背景），只输出晕的增量，不回写源色
+    outColor = uPremult > 0.5 ? vec4(haloCol * halo, halo) : vec4(base, 1.0);
     return;
   }
 
@@ -162,6 +165,7 @@ void main() {
   // 玻璃下微磨砂。模糊度对齐玻璃中部：位移映射的放大区（|s′|<1，对折线两侧
   // 在此列）会把采样拉伸显糊——按 |s′| 补偿性锐化拉回；压缩区不再额外加糊。
   float lod = log2(max(uBlur, 0.5) + 1.0) + min(0.0, log2(max(abs(sPrime), 0.2)));
+  if (uSrcLod0 > 0.5) lod = 0.0;   // 层间合成纹理无 mipmap（且不缺磨砂的观感）
   vec3 col = vec3(
     textureLod(uBg, spR / uRes, lod).r,
     textureLod(uBg, spG / uRes, lod).g,
@@ -208,11 +212,20 @@ void main() {
   col *= 1.0 - edgeLift * maskB * 0.40;              // 黑缘
 
   float aa = smoothstep(fth, -fth, sd);
-  outColor = vec4(mix(base, col, aa), 1.0);
+  if (uPremult > 0.5) {
+    // 预乘 over：玻璃体不透明（aa→1 时 alpha=1），晕/羽化带按覆盖度渐变——
+    // 下层玻璃能从晕带里透出来，不被上层的包围盒整块抹掉
+    float alpha = 1.0 - (1.0 - aa) * (1.0 - halo);
+    outColor = vec4((1.0 - aa) * haloCol * halo + aa * col, alpha);
+  } else {
+    outColor = vec4(mix(base, col, aa), 1.0);
+  }
 }`;
 
-// 背景上屏：背景纹理原样铺满画布（一次采样/像素）。玻璃 pass 只画包围盒，
-// 画布其余部分由这一趟负责——玻璃着色器不为屏幕外的像素陪跑。
+// 铺底拷贝：把源纹理原样铺进目标（每像素一次采样）。玻璃 pass 只画包围盒，
+// 目标的其余部分由这一趟负责——玻璃着色器不为无关像素陪跑。
+// 不用 gl.blitFramebuffer：Apple 的 tile-based GPU 上它要强制搬运缓冲，比
+// 全屏着色器 pass 更贵，且与默认帧缓冲格式不保证兼容（静默失败 = 黑屏）。
 const BLIT_FRAG = `#version 300 es
 precision highp float;
 uniform sampler2D uBg;
@@ -264,12 +277,14 @@ export function createLiquidGlass(canvas, opts) {
 
   // 背景纹理 + 两块合成纹理。堆叠时乒乓：每层玻璃读「下面的合成结果」写进
   // 自己的目标，上层因此能折射到下层玻璃（而不是各画各的、上层盖掉下层）。
-  const mkTex = () => {
+  const mkTex = (mips) => {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    // 背景纹理建 mipmap（玻璃的 LOD 磨砂要）；层间合成纹理不建——省掉每帧
+    // 两次全屏 mipmap 重建，采样方以 lod=0 读它（见 uSrcLod0）
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mips ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     return t;
   };
@@ -279,9 +294,9 @@ export function createLiquidGlass(canvas, opts) {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
     return f;
   };
-  const bgTex = mkTex();
-  const compTexA = mkTex();
-  const compTexB = mkTex();
+  const bgTex = mkTex(true);
+  const compTexA = mkTex(false);
+  const compTexB = mkTex(false);
   const bgFbo = mkFbo(bgTex);
   const compFboA = mkFbo(compTexA);
   const compFboB = mkFbo(compTexB);
@@ -303,6 +318,9 @@ export function createLiquidGlass(canvas, opts) {
   // 背景着色器声明 uTime 即视为动画背景（逐帧重画）；静态背景只在尺寸变化后画一次
   const bgAnimated = !!bgU.uTime;
   let bgDirty = true;
+
+  // 嵌套折射（默认关）：开 = 重叠的玻璃逐层合成、上层折射下层；关 = 单目标叠画
+  let nested = !!opts.nested;
 
   /** 全局光学参数——每块面板未单独指定的字段回落到这里 */
   const params = {
@@ -365,9 +383,8 @@ export function createLiquidGlass(canvas, opts) {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  /** 一块玻璃：先铺底，再在包围盒内着色（采样的是铺底的源） */
-  function drawPanel(srcTex, dstFbo, r, p) {
-    blit(srcTex, dstFbo);
+  /** 一块玻璃的着色（要求 src 已绑在 TEXTURE0、目标已绑定、viewport 已设） */
+  function drawGlass(r, p, premult, srcLod0) {
     // 包围盒余量 = max(采样距离, 环宽+12)〔折射采样与环境取色的最大外伸〕
     // + 羽化 + 24px〔外侧对比晕的衰减半径〕
     const reach = Math.max(p.dist, p.bevel + 12) + Math.max(p.feather, 0.5) + 24;
@@ -379,8 +396,6 @@ export function createLiquidGlass(canvas, opts) {
       Math.ceil(r.h + reach * 2));
     gl.useProgram(glassProg);
     gl.bindVertexArray(vao);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, srcTex);
     gl.uniform1i(gU.uBg, 0);
     gl.uniform2f(gU.uRes, canvas.width, canvas.height);
     gl.uniform4f(gU.uRect, r.x, r.y, r.w / 2, r.h / 2);
@@ -394,8 +409,20 @@ export function createLiquidGlass(canvas, opts) {
     gl.uniform1f(gU.uRim, p.rim);
     gl.uniform1f(gU.uFeather, p.feather);
     gl.uniform1f(gU.uEnvProj, p.envProj);
+    gl.uniform1f(gU.uPremult, premult);
+    gl.uniform1f(gU.uSrcLod0, srcLod0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.disable(gl.SCISSOR_TEST);
+  }
+
+  /** 包围盒（含余量）是否相交——相交才有层间折射的需求 */
+  function bboxHit(a, b) {
+    const ra = Math.max(a.dist ?? params.dist, (a.bevel ?? params.bevel) + 12)
+      + Math.max(a.feather ?? params.feather, 0.5) + 24;
+    const rb = Math.max(b.dist ?? params.dist, (b.bevel ?? params.bevel) + 12)
+      + Math.max(b.feather ?? params.feather, 0.5) + 24;
+    return Math.abs(a.x - b.x) * 2 < a.w + b.w + (ra + rb) * 2
+      && Math.abs(a.y - b.y) * 2 < a.h + b.h + (ra + rb) * 2;
   }
 
   function frame(now) {
@@ -417,22 +444,44 @@ export function createLiquidGlass(canvas, opts) {
       bgDirty = false;
     }
 
-    // pass 2：自后向前逐块合成。每块读下面的合成结果、写自己的目标；
-    // 中间目标建 mipmap（下一层的磨砂要 LOD 采样），最后一块直接上屏。
+    // pass 2：合成，两档——
+    // · 单目标叠画（默认；nested 关闭或包围盒互不相交时走这档）：一次铺底 +
+    //   各画各的小框，预乘混合让上层遮挡下层、晕叠在下层之上。零层间税、零 mipmap
+    // · 逐层合成（nested 开启且包围盒相交）：自后向前，上层采样下层的合成结果
+    //   ——重叠处「隔玻璃看玻璃」；每层铺底+小框，中间目标建 mipmap（磨砂要 LOD）
+    let needLayers = false;
+    if (nested) {
+      for (let i = 0; i < rects.length && !needLayers; i++) {
+        for (let j = i + 1; j < rects.length; j++) {
+          if (bboxHit(rects[i], rects[j])) { needLayers = true; break; }
+        }
+      }
+    }
+
     if (rects.length === 0) {
       blit(bgTex, null);
+    } else if (!needLayers) {
+      blit(bgTex, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // 预乘 over
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, bgTex);
+      for (const r of rects) drawGlass(r, resolve(r), 1, 0);
+      gl.disable(gl.BLEND);
     } else {
       let srcTex = bgTex;
       for (let i = 0; i < rects.length; i++) {
         const last = i === rects.length - 1;
         const mid = i % 2 === 0;
         const dstFbo = last ? null : mid ? compFboA : compFboB;
-        drawPanel(srcTex, dstFbo, rects[i], resolve(rects[i]));
-        if (!last) {
-          srcTex = mid ? compTexA : compTexB;
-          gl.bindTexture(gl.TEXTURE_2D, srcTex);
-          gl.generateMipmap(gl.TEXTURE_2D);
-        }
+        blit(srcTex, dstFbo);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, srcTex);
+        // 首层采样背景（有 mipmap，正常磨砂）；更上层采样层间合成（无 mipmap，lod=0）
+        drawGlass(rects[i], resolve(rects[i]), 0, i === 0 ? 0 : 1);
+        if (!last) srcTex = mid ? compTexA : compTexB;
       }
     }
 
@@ -447,6 +496,9 @@ export function createLiquidGlass(canvas, opts) {
   return {
     params,
     rects,
+    /** 嵌套折射开关：开 = 重叠玻璃逐层合成互相折射；关 = 单目标叠画（更快） */
+    get nested() { return nested; },
+    set nested(v) { nested = !!v; },
     /** 兼容单面板用法：第一块面板的别名 */
     get rect() { return rects[0]; },
     get fps() { return fps; },

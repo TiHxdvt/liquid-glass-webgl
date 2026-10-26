@@ -81,7 +81,8 @@ void main() {
 }`;
 
 const canvas = document.getElementById('stage');
-const lab = createLiquidGlass(canvas, { background: BG_FRAG });
+// nested: true = 堆叠演示玻璃压玻璃互相折射；产品默认 false（单目标叠画，更快）
+const lab = createLiquidGlass(canvas, { background: BG_FRAG, nested: true });
 
 // 堆叠演示：第二块玻璃（圆角方）叠在主面板上层，重叠处可见「隔玻璃看玻璃」的倒像。
 // 两块都显式摆位（引擎只把 (0,0) 的面板自动居中），错开叠一部分
@@ -149,15 +150,24 @@ for (const [name, p] of Object.entries(PRESETS)) {
 
 // 环境投影开关：快靠近的元素投影到玻璃上（边缘反光取色）。默认关。
 const envBtn = document.createElement('button');
+// 嵌套折射开关：开 = 玻璃压玻璃互相折射（逐层合成），关 = 上层遮挡（单目标，更快）
+const nestBtn = document.createElement('button');
 function syncToggles() {
   envBtn.textContent = '环境投影：' + (lab.params.envProj ? '开' : '关');
   envBtn.style.opacity = lab.params.envProj ? '1' : '0.55';
+  nestBtn.textContent = '嵌套折射：' + (lab.nested ? '开' : '关');
+  nestBtn.style.opacity = lab.nested ? '1' : '0.55';
 }
 envBtn.addEventListener('click', () => {
   lab.params.envProj = lab.params.envProj ? 0 : 1;
   syncToggles();
 });
+nestBtn.addEventListener('click', () => {
+  lab.nested = !lab.nested;
+  syncToggles();
+});
 presetsEl.appendChild(envBtn);
+presetsEl.appendChild(nestBtn);
 syncToggles();
 
 // 拖拽移动玻璃面板（client 坐标 → gl_FragCoord 坐标：y 翻转 + dpr）。
