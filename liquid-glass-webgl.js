@@ -32,6 +32,7 @@ uniform float uBlur;       // 玻璃下磨砂 px（顺带抹掉位移采样的�
 uniform float uDisp;       // 色散
 uniform float uRim;        // 边缘反光强度
 uniform float uFeather;    // 外缘羽化 px：轮廓内外颜色的过渡宽度
+uniform float uMilk;       // 乳白强度 0..1：0=纯透明玻璃，1=出厂标定的乳白透过率
 uniform float uEnvProj;    // 环境投影（0/1）：快靠近的元素投影到玻璃上，默认关
 uniform float uPremult;    // 合成模式：1=预乘混合（单目标叠画多块玻璃），0=不透明写（逐层合成）
 uniform float uSrcLod0;    // 采样源无 mipmap（层间合成纹理）时置 1：lod 恒 0，省掉全屏 mipmap 重建
@@ -171,15 +172,17 @@ void main() {
     textureLod(uBg, spG / uRes, lod).g,
     textureLod(uBg, spB / uRes, lod).b);
 
-  // 乳白玻璃透过率（0-255 色阶响应）：
+  // 乳白玻璃透过率（uMilk=1 时的 0-255 色阶响应）：
   //   白 254→228、黑 0→38、红(242,51,61)→(255,33,45)、绿(49,229,115)→(0,227,80)
   // 两步：①灰阶响应 0.748·c + 38/255（压高提低）；②彩度向亮度两侧不对称
-  // 扩张——亮侧 ×1.36、暗侧 ×2.09（彩底更鲜、暗通道下沉）。注意：这组系数
-  // 是玻璃的光学响应，改任一系数即偏离上面的透过率表。
-  col = col * 0.748 + vec3(38.0 / 255.0);
-  float lumC = dot(col, vec3(0.299, 0.587, 0.114));
-  vec3 devC = col - vec3(lumC);
-  col = vec3(lumC) + devC * mix(vec3(2.09), vec3(1.36), step(0.0, devC));
+  // 扩张——亮侧 ×1.36、暗侧 ×2.09（彩底更鲜、暗通道下沉）。
+  // uMilk 在原色与该响应间插值（0=纯透明）。注意：系数是玻璃的光学响应，
+  // 改任一系数即偏离上面的透过率表。
+  vec3 milky = col * 0.748 + vec3(38.0 / 255.0);
+  float lumC = dot(milky, vec3(0.299, 0.587, 0.114));
+  vec3 devC = milky - vec3(lumC);
+  milky = vec3(lumC) + devC * mix(vec3(2.09), vec3(1.36), step(0.0, devC));
+  col = mix(col, milky, clamp(uMilk, 0.0, 1.0));
 
   // 对折线光带：映射斜率 → 0 的位置。收紧系数——折线是条细线不是宽带。
   float seam = exp(-abs(sPrime) * 14.0);
@@ -331,7 +334,7 @@ export function createLiquidGlass(canvas, opts = {}) {
   /** 全局光学参数——每块面板未单独指定的字段回落到这里 */
   const params = {
     radius: 55, bevel: 25, dist: 50, fold: 2.6, bend: 3,
-    blur: 1, disp: 0.5, rim: 0, feather: 0.5, envProj: 0,
+    blur: 1, milk: 1, disp: 0.5, rim: 0, feather: 0.5, envProj: 0,
   };
 
   /**
@@ -343,7 +346,7 @@ export function createLiquidGlass(canvas, opts = {}) {
   const rects = [{ x: 0, y: 0, w: 360, h: 160 }];
   let placed = false;
 
-  const PKEYS = ['radius', 'bevel', 'dist', 'fold', 'bend', 'blur', 'disp', 'rim', 'feather', 'envProj'];
+  const PKEYS = ['radius', 'bevel', 'dist', 'fold', 'bend', 'blur', 'milk', 'disp', 'rim', 'feather', 'envProj'];
   const resolve = (r) => {
     const p = {};
     for (const k of PKEYS) p[k] = k in r ? r[k] : params[k];
@@ -431,6 +434,7 @@ export function createLiquidGlass(canvas, opts = {}) {
     gl.uniform1f(gU.uDisp, p.disp);
     gl.uniform1f(gU.uRim, p.rim);
     gl.uniform1f(gU.uFeather, p.feather);
+    gl.uniform1f(gU.uMilk, p.milk);
     gl.uniform1f(gU.uEnvProj, p.envProj);
     gl.uniform1f(gU.uPremult, premult);
     gl.uniform1f(gU.uSrcLod0, srcLod0);
