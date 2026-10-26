@@ -262,13 +262,30 @@ export function createLiquidGlass(canvas, opts) {
   const glassProg = program(gl, GLASS_FRAG);
   const vao = gl.createVertexArray();
 
-  const bgTex = gl.createTexture();
-  const fbo = gl.createFramebuffer();
-  gl.bindTexture(gl.TEXTURE_2D, bgTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  // 背景纹理 + 两块合成纹理。堆叠时乒乓：每层玻璃读「下面的合成结果」写进
+  // 自己的目标，上层因此能折射到下层玻璃（而不是各画各的、上层盖掉下层）。
+  const mkTex = () => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    return t;
+  };
+  const mkFbo = (tex) => {
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    return f;
+  };
+  const bgTex = mkTex();
+  const compTexA = mkTex();
+  const compTexB = mkTex();
+  const bgFbo = mkFbo(bgTex);
+  const compFboA = mkFbo(compTexA);
+  const compFboB = mkFbo(compTexB);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
   const uni = (p) => {
     const out = {};
@@ -287,15 +304,27 @@ export function createLiquidGlass(canvas, opts) {
   const bgAnimated = !!bgU.uTime;
   let bgDirty = true;
 
-  /** 调参面板绑定的参数对象——demo 直接改字段，逐帧生效 */
+  /** 全局光学参数——每块面板未单独指定的字段回落到这里 */
   const params = {
     radius: 55, bevel: 25, dist: 50, fold: 2.6, bend: 3,
     blur: 1, disp: 0.5, rim: 0, feather: 0.5, envProj: 0,
   };
 
-  /** 玻璃面板（设备像素坐标，y 向上 —— 与 gl_FragCoord 一致） */
-  const rect = { x: 0, y: 0, w: 360, h: 160 };
+  /**
+   * 玻璃面板数组（设备像素坐标，y 向上 —— 与 gl_FragCoord 一致）。
+   * 数组顺序 = 堆叠顺序，自后向前：每块玻璃采样它下面的合成结果，
+   * 包括更下层的玻璃——重叠处即「隔着上面的玻璃看下面被折射」。
+   * 每项可覆盖 params 里的任意光学字段，未给出的回落到全局 params。
+   */
+  const rects = [{ x: 0, y: 0, w: 360, h: 160 }];
   let placed = false;
+
+  const PKEYS = ['radius', 'bevel', 'dist', 'fold', 'bend', 'blur', 'disp', 'rim', 'feather', 'envProj'];
+  const resolve = (r) => {
+    const p = {};
+    for (const k of PKEYS) p[k] = k in r ? r[k] : params[k];
+    return p;
+  };
 
   let raf = 0;
   let frames = 0;
@@ -310,12 +339,63 @@ export function createLiquidGlass(canvas, opts) {
     canvas.width = w;
     canvas.height = h;
     bgDirty = true;
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bgTex, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    if (!placed) { placed = true; rect.x = w / 2; rect.y = h / 2; }
+    for (const t of [bgTex, compTexA, compTexB]) {
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    // 首次布局：停在 (0,0) 的面板视为未定位，自动居中；显式摆过位的不动
+    if (!placed) {
+      placed = true;
+      for (const r of rects) {
+        if (!r.x && !r.y) { r.x = w / 2; r.y = h / 2; }
+      }
+    }
+  }
+
+  /** 铺底：src 纹理原样铺进目标，保住玻璃包围盒以外的画面 */
+  function blit(srcTex, dstFbo) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dstFbo);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(blitProg);
+    gl.bindVertexArray(vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.uniform1i(blitU.uBg, 0);
+    gl.uniform2f(blitU.uRes, canvas.width, canvas.height);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /** 一块玻璃：先铺底，再在包围盒内着色（采样的是铺底的源） */
+  function drawPanel(srcTex, dstFbo, r, p) {
+    blit(srcTex, dstFbo);
+    // 包围盒余量 = max(采样距离, 环宽+12)〔折射采样与环境取色的最大外伸〕
+    // + 羽化 + 24px〔外侧对比晕的衰减半径〕
+    const reach = Math.max(p.dist, p.bevel + 12) + Math.max(p.feather, 0.5) + 24;
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(
+      Math.floor(r.x - r.w / 2 - reach),
+      Math.floor(r.y - r.h / 2 - reach),
+      Math.ceil(r.w + reach * 2),
+      Math.ceil(r.h + reach * 2));
+    gl.useProgram(glassProg);
+    gl.bindVertexArray(vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.uniform1i(gU.uBg, 0);
+    gl.uniform2f(gU.uRes, canvas.width, canvas.height);
+    gl.uniform4f(gU.uRect, r.x, r.y, r.w / 2, r.h / 2);
+    gl.uniform1f(gU.uRadius, p.radius);
+    gl.uniform1f(gU.uBevel, p.bevel);
+    gl.uniform1f(gU.uDist, p.dist);
+    gl.uniform1f(gU.uFold, p.fold);
+    gl.uniform1f(gU.uBend, p.bend);
+    gl.uniform1f(gU.uBlur, p.blur);
+    gl.uniform1f(gU.uDisp, p.disp);
+    gl.uniform1f(gU.uRim, p.rim);
+    gl.uniform1f(gU.uFeather, p.feather);
+    gl.uniform1f(gU.uEnvProj, p.envProj);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.disable(gl.SCISSOR_TEST);
   }
 
   function frame(now) {
@@ -325,7 +405,7 @@ export function createLiquidGlass(canvas, opts) {
     // pass 1：背景进纹理——静态背景只在尺寸变化后重画（含 mipmap 重建，
     // 磨砂靠 LOD 采样）；动画背景逐帧推 uTime
     if (bgAnimated || bgDirty) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, bgFbo);
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(bgProg);
       gl.bindVertexArray(vao);
@@ -337,46 +417,24 @@ export function createLiquidGlass(canvas, opts) {
       bgDirty = false;
     }
 
-    // pass 2：背景原样上屏（每像素一次采样，画布的大头由它负责）
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.useProgram(blitProg);
-    gl.bindVertexArray(vao);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
-    gl.uniform1i(blitU.uBg, 0);
-    gl.uniform2f(blitU.uRes, canvas.width, canvas.height);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    // pass 3：玻璃——裁剪到包围盒（面板 + 采样外伸 + 羽化 + 外晕余量）。
-    // 外伸取 max(采样距离, 环宽+12)：折射采样和环境取色最多探出这么远；
-    // +24px 是外侧对比晕的衰减半径。轮廓/折射着色器只跑这几十万像素。
-    const reach = Math.max(params.dist, params.bevel + 12) + Math.max(params.feather, 0.5) + 24;
-    gl.enable(gl.SCISSOR_TEST);
-    gl.scissor(
-      Math.floor(rect.x - rect.w / 2 - reach),
-      Math.floor(rect.y - rect.h / 2 - reach),
-      Math.ceil(rect.w + reach * 2),
-      Math.ceil(rect.h + reach * 2));
-    gl.useProgram(glassProg);
-    gl.bindVertexArray(vao);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
-    gl.uniform1i(gU.uBg, 0);
-    gl.uniform2f(gU.uRes, canvas.width, canvas.height);
-    gl.uniform4f(gU.uRect, rect.x, rect.y, rect.w / 2, rect.h / 2);
-    gl.uniform1f(gU.uRadius, params.radius);
-    gl.uniform1f(gU.uBevel, params.bevel);
-    gl.uniform1f(gU.uDist, params.dist);
-    gl.uniform1f(gU.uFold, params.fold);
-    gl.uniform1f(gU.uBend, params.bend);
-    gl.uniform1f(gU.uBlur, params.blur);
-    gl.uniform1f(gU.uDisp, params.disp);
-    gl.uniform1f(gU.uRim, params.rim);
-    gl.uniform1f(gU.uFeather, params.feather);
-    gl.uniform1f(gU.uEnvProj, params.envProj);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.disable(gl.SCISSOR_TEST);
+    // pass 2：自后向前逐块合成。每块读下面的合成结果、写自己的目标；
+    // 中间目标建 mipmap（下一层的磨砂要 LOD 采样），最后一块直接上屏。
+    if (rects.length === 0) {
+      blit(bgTex, null);
+    } else {
+      let srcTex = bgTex;
+      for (let i = 0; i < rects.length; i++) {
+        const last = i === rects.length - 1;
+        const mid = i % 2 === 0;
+        const dstFbo = last ? null : mid ? compFboA : compFboB;
+        drawPanel(srcTex, dstFbo, rects[i], resolve(rects[i]));
+        if (!last) {
+          srcTex = mid ? compTexA : compTexB;
+          gl.bindTexture(gl.TEXTURE_2D, srcTex);
+          gl.generateMipmap(gl.TEXTURE_2D);
+        }
+      }
+    }
 
     frames++;
     if (now - fpsT > 500) {
@@ -388,14 +446,16 @@ export function createLiquidGlass(canvas, opts) {
 
   return {
     params,
-    rect,
+    rects,
+    /** 兼容单面板用法：第一块面板的别名 */
+    get rect() { return rects[0]; },
     get fps() { return fps; },
     start() { if (!raf) raf = requestAnimationFrame(frame); },
     stop() { cancelAnimationFrame(raf); raf = 0; },
     dispose() {
       this.stop();
-      gl.deleteTexture(bgTex);
-      gl.deleteFramebuffer(fbo);
+      for (const t of [bgTex, compTexA, compTexB]) gl.deleteTexture(t);
+      for (const f of [bgFbo, compFboA, compFboB]) gl.deleteFramebuffer(f);
       gl.deleteProgram(bgProg);
       gl.deleteProgram(blitProg);
       gl.deleteProgram(glassProg);

@@ -22,6 +22,7 @@ physically-based refraction · single-file · zero-dependency
 - **Schlick 菲涅尔** — 边缘各边天然比背景略亮，反光颜色取自周边环境而非写死的白
 - **乳白玻璃** — 灰阶压高提低 + 彩度不对称扩张
 - **Cauchy 色散** — R/G/B 采样距离微差
+- **多块堆叠** — `rects` 数组自后向前逐层合成，重叠处上层玻璃会**折射下层玻璃**
 - **单文件零依赖** — 一个 `.js`，无构建要求，支持 WebGL2 即可
 
 ## Gallery
@@ -57,11 +58,20 @@ glass.start();
 玻璃的位置、尺寸与光学参数逐帧生效：
 
 ```js
-glass.rect.x = 480;            // 中心坐标（设备像素，y 向上）
+glass.rect.x = 480;            // 中心坐标（设备像素，y 向上）；rect 即 rects[0]
 glass.params.radius = 55;      // 圆角
 glass.params.dist = 50;        // 采样距离
 
 glass.start(); glass.stop(); glass.dispose();
+```
+
+多块玻璃：数组顺序 = 堆叠顺序（自后向前），每块采样它下面的合成结果——
+重叠处即「隔着上面的玻璃看下面被折射」。每项可单独覆盖任意光学字段，
+未给出的回落到全局 `params`：
+
+```js
+glass.rects.push({ x: 900, y: 400, w: 220, h: 220, radius: 110 });
+glass.rects.push({ x: 500, y: 300, w: 360, h: 160, dist: 70 });  // 这块采样距离不同
 ```
 
 ## Parameters

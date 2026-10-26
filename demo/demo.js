@@ -83,6 +83,13 @@ void main() {
 const canvas = document.getElementById('stage');
 const lab = createLiquidGlass(canvas, { background: BG_FRAG });
 
+// 堆叠演示：第二块玻璃（圆角方）叠在主面板上层，重叠处可见「隔玻璃看玻璃」的倒像。
+// 两块都显式摆位（引擎只把 (0,0) 的面板自动居中），错开叠一部分
+const dpr = Math.min(window.devicePixelRatio || 1, 2);
+lab.rect.x = canvas.clientWidth * dpr * 0.42;
+lab.rect.y = canvas.clientHeight * dpr * 0.58;
+lab.rects.push({ x: canvas.clientWidth * dpr * 0.62, y: canvas.clientHeight * dpr * 0.38, w: 200, h: 200, radius: 100 });
+
 // ── 调参滑杆定义：[key, 中文标签, min, max, step] ──
 const SLIDERS = [
   ['bevel', '边缘环宽', 4, 100, 1],
@@ -153,21 +160,34 @@ envBtn.addEventListener('click', () => {
 presetsEl.appendChild(envBtn);
 syncToggles();
 
-// 拖拽移动玻璃面板（client 坐标 → gl_FragCoord 坐标：y 翻转 + dpr）
-let dragging = false;
+// 拖拽移动玻璃面板（client 坐标 → gl_FragCoord 坐标：y 翻转 + dpr）。
+// 命中检测取最上层的面板——数组靠后 = 堆叠在上层
+let dragging = null;
 canvas.addEventListener('pointerdown', (e) => {
-  dragging = true;
-  canvas.setPointerCapture(e.pointerId);
-  moveTo(e);
+  const pt = toStage(e);
+  dragging = hitPanel(pt.x, pt.y);
+  if (dragging) canvas.setPointerCapture(e.pointerId);
 });
-canvas.addEventListener('pointermove', (e) => { if (dragging) moveTo(e); });
-canvas.addEventListener('pointerup', () => { dragging = false; });
+canvas.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  const pt = toStage(e);
+  dragging.x = pt.x;
+  dragging.y = pt.y;
+});
+canvas.addEventListener('pointerup', () => { dragging = null; });
 
-function moveTo(e) {
+function toStage(e) {
   const r = canvas.getBoundingClientRect();
   const dpr = canvas.width / r.width;
-  lab.rect.x = (e.clientX - r.left) * dpr;
-  lab.rect.y = (r.bottom - e.clientY) * dpr;
+  return { x: (e.clientX - r.left) * dpr, y: (r.bottom - e.clientY) * dpr };
+}
+
+function hitPanel(x, y) {
+  for (let i = lab.rects.length - 1; i >= 0; i--) {
+    const r = lab.rects[i];
+    if (Math.abs(x - r.x) <= r.w / 2 && Math.abs(y - r.y) <= r.h / 2) return r;
+  }
+  return null;
 }
 
 // FPS 显示
