@@ -211,6 +211,17 @@ void main() {
   outColor = vec4(mix(base, col, aa), 1.0);
 }`;
 
+// 背景上屏：背景纹理原样铺满画布（一次采样/像素）。玻璃 pass 只画包围盒，
+// 画布其余部分由这一趟负责——玻璃着色器不为屏幕外的像素陪跑。
+const BLIT_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D uBg;
+uniform vec2 uRes;
+out vec4 outColor;
+void main() {
+  outColor = texture(uBg, gl_FragCoord.xy / uRes);
+}`;
+
 function compile(gl, type, src) {
   const sh = gl.createShader(type);
   gl.shaderSource(sh, src);
@@ -247,6 +258,7 @@ export function createLiquidGlass(canvas, opts) {
   if (!gl) throw new Error('需要 WebGL2');
 
   const bgProg = program(gl, opts.background);
+  const blitProg = program(gl, BLIT_FRAG);
   const glassProg = program(gl, GLASS_FRAG);
   const vao = gl.createVertexArray();
 
@@ -268,7 +280,12 @@ export function createLiquidGlass(canvas, opts) {
     return out;
   };
   const bgU = uni(bgProg);
+  const blitU = uni(blitProg);
   const gU = uni(glassProg);
+
+  // 背景着色器声明 uTime 即视为动画背景（逐帧重画）；静态背景只在尺寸变化后画一次
+  const bgAnimated = !!bgU.uTime;
+  let bgDirty = true;
 
   /** 调参面板绑定的参数对象——demo 直接改字段，逐帧生效 */
   const params = {
@@ -292,6 +309,7 @@ export function createLiquidGlass(canvas, opts) {
     if (canvas.width === w && canvas.height === h) return;
     canvas.width = w;
     canvas.height = h;
+    bgDirty = true;
     gl.bindTexture(gl.TEXTURE_2D, bgTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
@@ -304,20 +322,44 @@ export function createLiquidGlass(canvas, opts) {
     raf = requestAnimationFrame(frame);
     resize();
 
-    // pass 1：背景进纹理（背景着色器可声明 uTime 做动画，逐帧推时间）
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.useProgram(bgProg);
-    gl.bindVertexArray(vao);
-    gl.uniform2f(bgU.uRes, canvas.width, canvas.height);
-    if (bgU.uTime) gl.uniform1f(bgU.uTime, now * 0.001);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.bindTexture(gl.TEXTURE_2D, bgTex);
-    gl.generateMipmap(gl.TEXTURE_2D);
+    // pass 1：背景进纹理——静态背景只在尺寸变化后重画（含 mipmap 重建，
+    // 磨砂靠 LOD 采样）；动画背景逐帧推 uTime
+    if (bgAnimated || bgDirty) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(bgProg);
+      gl.bindVertexArray(vao);
+      gl.uniform2f(bgU.uRes, canvas.width, canvas.height);
+      if (bgU.uTime) gl.uniform1f(bgU.uTime, now * 0.001);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindTexture(gl.TEXTURE_2D, bgTex);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      bgDirty = false;
+    }
 
-    // pass 2：玻璃着色采样背景
+    // pass 2：背景原样上屏（每像素一次采样，画布的大头由它负责）
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(blitProg);
+    gl.bindVertexArray(vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, bgTex);
+    gl.uniform1i(blitU.uBg, 0);
+    gl.uniform2f(blitU.uRes, canvas.width, canvas.height);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // pass 3：玻璃——裁剪到包围盒（面板 + 采样外伸 + 羽化 + 外晕余量）。
+    // 外伸取 max(采样距离, 环宽+12)：折射采样和环境取色最多探出这么远；
+    // +24px 是外侧对比晕的衰减半径。轮廓/折射着色器只跑这几十万像素。
+    const reach = Math.max(params.dist, params.bevel + 12) + Math.max(params.feather, 0.5) + 24;
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(
+      Math.floor(rect.x - rect.w / 2 - reach),
+      Math.floor(rect.y - rect.h / 2 - reach),
+      Math.ceil(rect.w + reach * 2),
+      Math.ceil(rect.h + reach * 2));
     gl.useProgram(glassProg);
+    gl.bindVertexArray(vao);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, bgTex);
     gl.uniform1i(gU.uBg, 0);
@@ -334,6 +376,7 @@ export function createLiquidGlass(canvas, opts) {
     gl.uniform1f(gU.uFeather, params.feather);
     gl.uniform1f(gU.uEnvProj, params.envProj);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.disable(gl.SCISSOR_TEST);
 
     frames++;
     if (now - fpsT > 500) {
@@ -354,6 +397,7 @@ export function createLiquidGlass(canvas, opts) {
       gl.deleteTexture(bgTex);
       gl.deleteFramebuffer(fbo);
       gl.deleteProgram(bgProg);
+      gl.deleteProgram(blitProg);
       gl.deleteProgram(glassProg);
       gl.deleteVertexArray(vao);
     },
