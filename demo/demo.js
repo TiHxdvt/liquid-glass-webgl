@@ -179,12 +179,14 @@ canvas.addEventListener('pointerdown', (e) => {
   if (dragging) canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener('pointermove', (e) => {
-  if (!dragging) return;
+  if (!dragging || !e.buttons) return;
   const pt = toStage(e);
   dragging.x = pt.x;
   dragging.y = pt.y;
 });
 canvas.addEventListener('pointerup', () => { dragging = null; });
+canvas.addEventListener('pointercancel', () => { dragging = null; });
+canvas.addEventListener('lostpointercapture', () => { dragging = null; });
 
 function toStage(e) {
   const r = canvas.getBoundingClientRect();
