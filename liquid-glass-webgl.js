@@ -36,6 +36,8 @@ uniform float uTint;       // 玻色：0=纯透明，+1=浅色模式透过率，
 uniform float uEnvProj;    // 环境投影（0/1）：快靠近的元素投影到玻璃上，默认关
 uniform float uPremult;    // 合成模式：1=预乘混合（单目标叠画多块玻璃），0=不透明写（逐层合成）
 uniform sampler2D uSoft;   // 预模糊纹（分离高斯，见 BLUR_FRAG）——磨砂的唯一采样源
+// 取样一律 textureLod(..., 0)：texture() 的自动 lod 在 scissor 边界的残缺 quad
+// 上导数爆炸、跳读粗 mip（粗 mip=场景均色→红/黑伪影缝），驱动相关、随拖拽闪烁
 
 out vec4 outColor;
 
@@ -85,7 +87,7 @@ void main() {
   const float fth = 0.5;
   if (sd > fth) {
     // 预乘模式：底上已有画面（下层玻璃/背景），体外无增量可加
-    outColor = uPremult > 0.5 ? vec4(0.0) : vec4(texture(uBg, frag / uRes).rgb, 1.0);
+    outColor = uPremult > 0.5 ? vec4(0.0) : vec4(textureLod(uBg, frag / uRes, 0.0).rgb, 1.0);
     return;
   }
 
@@ -190,18 +192,18 @@ void main() {
       // 显示偏移 d → 源侧偏移：切向 1:1，法向按 s′ 拉伸（足迹形状）
       vec2 off = d + inward * ((fp - 1.0) * dot(d, inward));
       col += split
-        ? vec3(texture(uSoft, (spR + off) / uRes).r,
-               texture(uSoft, (spG + off) / uRes).g,
-               texture(uSoft, (spB + off) / uRes).b)
-        : texture(uSoft, (spG + off) / uRes).rgb;
+        ? vec3(textureLod(uSoft, (spR + off) / uRes, 0.0).r,
+               textureLod(uSoft, (spG + off) / uRes, 0.0).g,
+               textureLod(uSoft, (spB + off) / uRes, 0.0).b)
+        : textureLod(uSoft, (spG + off) / uRes, 0.0).rgb;
     }
     col *= 0.25;
   } else {
     col = split
-      ? vec3(texture(uSoft, spR / uRes).r,
-             texture(uSoft, spG / uRes).g,
-             texture(uSoft, spB / uRes).b)
-      : texture(uSoft, spG / uRes).rgb;
+      ? vec3(textureLod(uSoft, spR / uRes, 0.0).r,
+             textureLod(uSoft, spG / uRes, 0.0).g,
+             textureLod(uSoft, spB / uRes, 0.0).b)
+      : textureLod(uSoft, spG / uRes, 0.0).rgb;
   }
 
   // 玻色透过率（玻璃自色）。uTint：0 纯透明，+1 浅色模式，−1 深色模式；绝对值是强度。
@@ -256,7 +258,7 @@ void main() {
     // 预乘 over：玻璃体不透明（aa→1 时 alpha=1），轮廓过渡带按覆盖度渐变
     outColor = vec4(col * aa, aa);
   } else {
-    outColor = vec4(mix(texture(uBg, frag / uRes).rgb, col, aa), 1.0);
+    outColor = vec4(mix(textureLod(uBg, frag / uRes, 0.0).rgb, col, aa), 1.0);
   }
 }`;
 
@@ -303,7 +305,7 @@ uniform sampler2D uBg;
 uniform vec2 uRes;
 out vec4 outColor;
 void main() {
-  outColor = texture(uBg, gl_FragCoord.xy / uRes);
+  outColor = textureLod(uBg, gl_FragCoord.xy / uRes, 0.0);
 }`;
 
 function compile(gl, type, src) {
@@ -556,6 +558,8 @@ export function createLiquidGlass(canvas, opts = {}) {
     gl.bindVertexArray(vao);
     gl.enable(gl.SCISSOR_TEST);
     gl.uniform1i(blurU.uBg, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, null);   // 解绑上一玻璃的柔纹——避免与输出目标同绑（反馈隐患）
     gl.activeTexture(gl.TEXTURE0);
     // 横：src → blurA（范围须含纵趟的核读取）
     gl.bindFramebuffer(gl.FRAMEBUFFER, blurFboA);
