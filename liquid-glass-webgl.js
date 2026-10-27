@@ -32,7 +32,6 @@ uniform float uFold;       // 倒像陡度：位移衰减幂次，>1 时场内�
 uniform float uBend;       // 软弯倍率：折返点曲率半径的放大系数（几何半径×倍率）
 uniform float uDisp;       // 色散
 uniform float uRim;        // 边缘反光强度
-uniform float uFeather;    // 外缘羽化 px：轮廓内外颜色的过渡宽度
 uniform float uTint;       // 玻色：0=纯透明，+1=浅色模式透过率，−1=深色模式透过率（绝对值=强度）
 uniform float uEnvProj;    // 环境投影（0/1）：快靠近的元素投影到玻璃上，默认关
 uniform float uPremult;    // 合成模式：1=预乘混合（单目标叠画多块玻璃），0=不透明写（逐层合成）
@@ -79,21 +78,15 @@ void main() {
   float maskB = ang / 1.5708;                   // 黑：弯角渐隐带
   vec3 plain = texture(uBg, frag / uRes).rgb;
 
-  // 外侧对比晕（白底黑晕、黑底白晕）。内外共用这一段，保证轮廓处连续。
-  float bgLum = dot(plain, vec3(0.299, 0.587, 0.114));
-  vec3 haloCol = mix(vec3(0.95), vec3(0.05), smoothstep(0.35, 0.65, bgLum));
-  float halo = exp(-max(sd, 0.0) / 3.5) * 0.25 * max(maskW, maskB);
-  vec3 base = mix(plain, haloCol, halo);
-
   // 玻璃外：不进折射/轮廓数学。注意：一切 exp(-depth/k) 型轮廓项
   // 必须钳在玻璃内（max(depth,0)）——玻璃外 depth<0 时指数溢出为 Inf，
   // Inf×0=NaN 会把大片画面抹黑，黑区边界沿遮罩零线走，呈直边状假投影。
   // 轮廓过渡宽固定 0.5px（±0.5px 共 1px 的覆盖渐变），仅用于抗锯齿，
   // 不作为视觉参数：过窄则圆角出现台阶，过宽则轮廓锐度损失
-  float fth = max(uFeather, 0.5);
+  const float fth = 0.5;
   if (sd > fth) {
-    // 预乘模式：底上已经有画面（下层玻璃/背景），只输出晕的增量，不回写源色
-    outColor = uPremult > 0.5 ? vec4(haloCol * halo, halo) : vec4(base, 1.0);
+    // 预乘模式：底上已有画面（下层玻璃/背景），体外无增量可加
+    outColor = uPremult > 0.5 ? vec4(0.0) : vec4(plain, 1.0);
     return;
   }
 
@@ -259,10 +252,9 @@ void main() {
   float aa = smoothstep(fth, -fth, sd);
   if (uPremult > 0.5) {
     // 预乘 over：玻璃体不透明（aa→1 时 alpha=1），轮廓过渡带按覆盖度渐变
-    float alpha = 1.0 - (1.0 - aa) * (1.0 - halo);
-    outColor = vec4((1.0 - aa) * haloCol * halo + aa * col, alpha);
+    outColor = vec4(col * aa, aa);
   } else {
-    outColor = vec4(mix(base, col, aa), 1.0);
+    outColor = vec4(mix(plain, col, aa), 1.0);
   }
 }`;
 
