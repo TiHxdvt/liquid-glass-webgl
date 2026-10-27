@@ -9,38 +9,82 @@
   html, body { height: 100%; overflow: hidden; background: #0a0c12; font: 12px/1.6 -apple-system, "PingFang SC", sans-serif; }
   #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
   #stage:active { cursor: grabbing; }
+
+  /* ── 调参面板：可收起，收起后右缘留一颗悬浮按钮 ── */
   .panel {
-    position: fixed; top: 12px; right: 12px; bottom: 12px; width: 264px;
+    position: fixed; top: 12px; right: 12px; bottom: 12px; width: 268px;
     overflow-y: auto; padding: 14px; border-radius: 14px;
     background: rgba(12, 14, 20, 0.82); backdrop-filter: blur(14px);
     border: 1px solid rgba(255, 255, 255, 0.08); color: #c8cdd6;
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    scrollbar-width: thin;
   }
-  .panel h1 { font-size: 13px; font-weight: 600; color: #fff; margin-bottom: 2px; }
+  body.panel-hidden .panel { transform: translateX(calc(100% + 20px)); pointer-events: none; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+  .panel h1 { font-size: 13px; font-weight: 600; color: #fff; }
   .panel .sub { font-size: 11px; color: #7a8290; margin-bottom: 12px; }
+  .icon-btn {
+    width: 24px; height: 24px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.06); color: #c8cdd6; font-size: 12px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .icon-btn:hover { background: rgba(255,255,255,0.12); }
+  .fab {
+    position: fixed; top: 12px; right: 12px; z-index: 20;
+    display: none; align-items: center; gap: 6px;
+    padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(12, 14, 20, 0.88); backdrop-filter: blur(14px);
+    color: #dfe3ea; font-size: 12px; cursor: pointer;
+  }
+  .fab:hover { background: rgba(30, 34, 44, 0.92); }
+  body.panel-hidden .fab { display: flex; }
+
+  .sec { margin: 12px 0 6px; font-size: 10px; letter-spacing: 1px; color: #5d6674; }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   .row .name { flex: 0 0 56px; font-size: 11px; color: #8b93a1; }
   .row input[type=range] { flex: 1; accent-color: #4f8cff; }
   .row .val { flex: 0 0 36px; text-align: right; font-size: 11px; color: #dfe3ea; font-variant-numeric: tabular-nums; }
-  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; }
   .btns button {
     padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.12);
     background: rgba(255,255,255,0.06); color: #c8cdd6; font-size: 11px; cursor: pointer;
   }
   .btns button:hover { background: rgba(255,255,255,0.12); }
+  .btns button.on { background: rgba(79,140,255,0.22); border-color: rgba(79,140,255,0.45); color: #cfe0ff; }
   .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.07); font-size: 11px; color: #7a8290; }
+  .foot .btns { margin-top: 8px; }
   #fps { color: #9fe6a8; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 <canvas id="stage"></canvas>
-<aside class="panel">
-  <h1>liquid-glass-webgl · 液态玻璃</h1>
+<button class="fab" id="fab">⚙ 调参</button>
+<aside class="panel" id="panel">
+  <div class="panel-head">
+    <h1>liquid-glass-webgl · 液态玻璃</h1>
+    <button class="icon-btn" id="collapse" title="收起面板">»</button>
+  </div>
   <div class="sub">物理内核：斯涅尔折射 + Schlick 菲涅尔 + 解析 SDF</div>
+
+  <div class="sec">预设</div>
   <div class="btns" id="presets"></div>
+
+  <div class="sec">开关</div>
+  <div class="btns" id="toggles"></div>
+
+  <div class="sec">背景</div>
+  <div class="btns" id="bgs"></div>
+
+  <div class="sec">玻璃面板</div>
+  <div class="btns" id="panels"></div>
+
+  <div class="sec">光学参数</div>
   <div id="sliders"></div>
+
   <div class="foot">
-    拖拽画布移动玻璃面板 · <span id="fps">–</span><br />
+    拖拽画布移动玻璃 · <span id="fps">–</span><br />
     独立实验区，不进产品构建
+    <div class="btns"><button id="copy">复制参数</button></div>
   </div>
 </aside>
 <script type="module" src="./demo.js"></script>
