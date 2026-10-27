@@ -33,7 +33,7 @@ uniform float uBend;       // 软弯倍率：折返点曲率半径的放大系�
 uniform float uDisp;       // 色散
 uniform float uRim;        // 边缘反光强度
 uniform float uFeather;    // 外缘羽化 px：轮廓内外颜色的过渡宽度
-uniform float uMilk;       // 乳白强度 0..1：0=纯透明玻璃，1=出厂标定的乳白透过率
+uniform float uTint;       // 玻色：0=纯透明，+1=浅色模式透过率，−1=深色模式透过率（绝对值=强度）
 uniform float uEnvProj;    // 环境投影（0/1）：快靠近的元素投影到玻璃上，默认关
 uniform float uPremult;    // 合成模式：1=预乘混合（单目标叠画多块玻璃），0=不透明写（逐层合成）
 uniform sampler2D uSoft;   // 预模糊纹（分离高斯，见 BLUR_FRAG）——磨砂的唯一采样源
@@ -53,6 +53,13 @@ float sdRoundRect(vec2 p, vec2 b, float r) {
   return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
 }
 
+// 彩度向亮度两侧不对称扩张——玻色两模式共用的第二步骨架（系数是各自
+// 透过率表的响应，见下方标定表）
+vec3 chromaExpand(vec3 c, float hi, float lo) {
+  float lum = dot(c, vec3(0.299, 0.587, 0.114));
+  vec3 dev = c - vec3(lum);
+  return vec3(lum) + dev * mix(vec3(lo), vec3(hi), step(0.0, dev));
+}
 
 void main() {
   vec2 frag = gl_FragCoord.xy;
@@ -205,17 +212,19 @@ void main() {
       : texture(uSoft, spG / uRes).rgb;
   }
 
-  // 乳白玻璃透过率（uMilk=1 时的 0-255 色阶响应）：
-  //   白 254→228、黑 0→38、红(242,51,61)→(255,33,45)、绿(49,229,115)→(0,227,80)
-  // 两步：①灰阶响应 0.748·c + 38/255（压高提低）；②彩度向亮度两侧不对称
-  // 扩张——亮侧 ×1.36、暗侧 ×2.09（彩底更鲜、暗通道下沉）。
-  // uMilk 在原色与该响应间插值（0=纯透明）。注意：系数是玻璃的光学响应，
-  // 改任一系数即偏离上面的透过率表。
-  vec3 milky = col * 0.748 + vec3(38.0 / 255.0);
-  float lumC = dot(milky, vec3(0.299, 0.587, 0.114));
-  vec3 devC = milky - vec3(lumC);
-  milky = vec3(lumC) + devC * mix(vec3(2.09), vec3(1.36), step(0.0, devC));
-  col = mix(col, milky, clamp(uMilk, 0.0, 1.0));
+  // 玻色透过率（玻璃自色）。uTint：0 纯透明，+1 浅色模式，−1 深色模式；绝对值是强度。
+  // 浅色（标定表）：白 254→228、黑 0→38、红(242,51,61)→(255,33,45)、
+  //   绿(49,229,115)→(0,227,80)。两步：①灰阶响应 0.748·c+38/255（压高提低）；
+  //   ②彩度向亮度两侧不对称扩张——亮侧 ×1.36、暗侧 ×2.09（彩底更鲜、暗通道下沉）。
+  // 深色（同法标定）：白 255→176、中灰 115→99、黑 0→12、红(217,34,41)→(229,0,23)、
+  //   绿(49,229,115)→(0,182,58)。两步：①灰阶幂调 0.047+0.643·c^0.8（压高更狠、
+  //   黑位微提，白/中灰/黑三点定线）；②彩度扩张——亮侧 ×1.8、暗侧 ×2.25
+  //（彩度两色取残差平衡；灰阶三点全中，彩色 ±10 上下）。
+  // 注意：系数是玻璃的光学响应，改任一系数即偏离上面的透过率表。
+  vec3 tinted = uTint >= 0.0
+    ? chromaExpand(col * 0.748 + vec3(38.0 / 255.0), 1.36, 2.09)
+    : chromaExpand(vec3(0.047) + pow(max(col, vec3(0.0)), vec3(0.8)) * 0.643, 1.8, 2.25);
+  col = mix(col, tinted, clamp(abs(uTint), 0.0, 1.0));
 
   // 对折线光带：映射斜率 → 0 的位置。收紧系数——折线是条细线不是宽带。
   float seam = exp(-abs(sPrime) * 14.0);
@@ -406,7 +415,7 @@ export function createLiquidGlass(canvas, opts = {}) {
   /** 全局光学参数——每块面板未单独指定的字段回落到这里 */
   const params = {
     radius: 55, bevel: 25, dist: 50, fold: 2.6, bend: 3,
-    blur: 1, milk: 1, disp: 0.5, rim: 0, envProj: 0,
+    blur: 1, tint: 1, disp: 0.5, rim: 0, envProj: 0,
   };
 
   /**
@@ -418,7 +427,7 @@ export function createLiquidGlass(canvas, opts = {}) {
   const rects = [{ x: 0, y: 0, w: 360, h: 160 }];
   let placed = false;
 
-  const PKEYS = ['radius', 'bevel', 'dist', 'fold', 'bend', 'blur', 'milk', 'disp', 'rim', 'envProj'];
+  const PKEYS = ['radius', 'bevel', 'dist', 'fold', 'bend', 'blur', 'tint', 'disp', 'rim', 'envProj'];
   const resolve = (r) => {
     const p = {};
     for (const k of PKEYS) p[k] = k in r ? r[k] : params[k];
@@ -562,7 +571,7 @@ export function createLiquidGlass(canvas, opts = {}) {
     gl.uniform1f(gU.uBend, p.bend);
     gl.uniform1f(gU.uDisp, p.disp);
     gl.uniform1f(gU.uRim, p.rim);
-    gl.uniform1f(gU.uMilk, p.milk);
+    gl.uniform1f(gU.uTint, p.tint);
     gl.uniform1f(gU.uEnvProj, p.envProj);
     gl.uniform1f(gU.uPremult, premult);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
