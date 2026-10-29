@@ -383,14 +383,15 @@ export function createLiquidGlass(canvas, opts = {}) {
     return f;
   };
   const bgTex = mkTex(true);
-  const compTexA = mkTex(false);
-  const compTexB = mkTex(false);
+  // transparent 三明治模式下 needLayers 恒为 false，不分配两张全屏层间合成纹与 FBO（省显存与 resize 开销）
+  const compTexA = transparent ? null : mkTex(false);
+  const compTexB = transparent ? null : mkTex(false);
   // 磨砂柔纹 ×2（乒乓）：全分辨率、无 mipmap——分离高斯在这上面卷
   const blurTexA = mkTex(false);
   const blurTexB = mkTex(false);
   const bgFbo = mkFbo(bgTex);
-  const compFboA = mkFbo(compTexA);
-  const compFboB = mkFbo(compTexB);
+  const compFboA = compTexA ? mkFbo(compTexA) : null;
+  const compFboB = compTexB ? mkFbo(compTexB) : null;
   const blurFboA = mkFbo(blurTexA);
   const blurFboB = mkFbo(blurTexB);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -445,25 +446,38 @@ export function createLiquidGlass(canvas, opts = {}) {
   let fpsT = performance.now();
   let fps = 0;
   let sized = false;   // 纹理是否已按画布尺寸分配（同画布重建实例时尺寸不变，不能凭尺寸跳过）
+  let bgTexW = 0;
+  let bgTexH = 0;
 
-  function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = Math.round(canvas.clientWidth * dpr);
-    const h = Math.round(canvas.clientHeight * dpr);
+  function resize(targetW, targetH) {
+    let w, h;
+    if (targetW > 0 && targetH > 0) {
+      w = Math.round(targetW);
+      h = Math.round(targetH);
+    } else {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      w = Math.round(canvas.clientWidth * dpr);
+      h = Math.round(canvas.clientHeight * dpr);
+    }
+    if (w <= 0 || h <= 0) return;
     if (sized && canvas.width === w && canvas.height === h) return;
     sized = true;
     canvas.width = w;
     canvas.height = h;
     bgDirty = true;
+    const compList = compTexA ? [compTexA, compTexB] : [];
     // 纹理模式下 bgTex 的尺寸由外部喂的源决定，resize 不碰它
-    for (const t of (bgTexture ? [compTexA, compTexB] : [bgTex, compTexA, compTexB])) {
+    if (!bgTexture) {
+      gl.bindTexture(gl.TEXTURE_2D, bgTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      bgTexW = w;
+      bgTexH = h;
+    }
+    for (const t of compList) {
       gl.bindTexture(gl.TEXTURE_2D, t);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    }
-    // 重分配会作废 mip 链——若合成纹还挂着三线性滤波就成了「不完整纹理」
-    //（采样恒返回黑）。回到基态 LINEAR，由 blurSource 需要时再建 mip/切滤波
-    for (const t of [compTexA, compTexB]) {
-      gl.bindTexture(gl.TEXTURE_2D, t);
+      // 重分配会作废 mip 链——若合成纹还挂着三线性滤波就成了「不完整纹理」
+      //（采样恒返回黑）。回到基态 LINEAR，由 blurSource 需要时再建 mip/切滤波
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     }
     // 磨砂柔纹全分辨率（半分辨率存在重建地板，σ 较小时模糊量受限）
@@ -483,31 +497,43 @@ export function createLiquidGlass(canvas, opts = {}) {
   /**
    * 喂背景画面（纹理模式）：src 是任意 TexImageSource（canvas/ImageBitmap…），
    * 引擎翻转 y（源 y 向下 → gl_FragCoord 的 y 向上）后上传并建 mipmap。
-   * 动画背景每帧调用；分辨率不必与画布一致（按归一化坐标采样）。
+   * 若调用方已在 2D 合成阶段完成翻转（opts.preflipped = true）且使用 { alpha: false } 画布，
+   * 可跳过 UNPACK_FLIP_Y_WEBGL（避免 Chromium/ANGLE 回退 CPU 逐行翻转与反预乘）并复用 texSubImage2D。
    */
   let flipCanvas = null;
-  function setBackground(src) {
+  function setBackground(src, uploadOpts) {
     if (!src) {
       // 回退着色器背景路径（解除纹理模式的单向闩锁）
       bgTexture = false;
+      bgTexW = 0;
+      bgTexH = 0;
       bgDirty = true;
       return;
     }
     bgTexture = true;
+    const flipY = !(uploadOpts && uploadOpts.preflipped);
     gl.bindTexture(gl.TEXTURE_2D, bgTex);
     // UNPACK_FLIP_Y 对 ImageBitmap 按规范被静默忽略——原样拷进 2D canvas
     // 转成 flag 生效的源，翻转统一交给下方的 pixelStore（拷贝不镜像，翻转
     // 只发生一次）
-    if (typeof ImageBitmap !== 'undefined' && src instanceof ImageBitmap) {
+    if (flipY && typeof ImageBitmap !== 'undefined' && src instanceof ImageBitmap) {
       if (!flipCanvas) flipCanvas = document.createElement('canvas');
       flipCanvas.width = src.width;
       flipCanvas.height = src.height;
       flipCanvas.getContext('2d').drawImage(src, 0, 0);
       src = flipCanvas;
     }
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    const srcW = src.width || src.videoWidth || 0;
+    const srcH = src.height || src.videoHeight || 0;
+    if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    if (srcW > 0 && srcH > 0 && srcW === bgTexW && srcH === bgTexH) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src);
+      bgTexW = srcW;
+      bgTexH = srcH;
+    }
+    if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.generateMipmap(gl.TEXTURE_2D);
     bgDirty = false;
   }
@@ -639,9 +665,9 @@ export function createLiquidGlass(canvas, opts = {}) {
   }
 
   /** 渲一帧（外部驱动入口：接入方把它挂进自己的帧循环）；start() 的内部 rAF 也走这 */
-  function render(now) {
+  function render(now, targetW, targetH) {
     if (!Number.isFinite(now)) now = performance.now();   // 防 render() 裸调把 NaN 喂进 uTime
-    resize();
+    resize(targetW, targetH);
 
     // pass 1：背景进纹理。纹理模式（setBackground）下由调用方负责；着色器模式下
     // 静态背景只在尺寸变化后重画（含 mipmap 重建，窄模糊档靠 LOD 采样），动画背景逐帧推 uTime
@@ -741,8 +767,8 @@ export function createLiquidGlass(canvas, opts = {}) {
     setBackground,
     /** 外部驱动渲一帧（挂进自己的帧循环用它，配合 stop() 不开内部 rAF）。
      *  内部 rAF 运行期间调用会被忽略——避免双驱叠画/翻倍计 fps */
-    render(now) {
-      if (!raf) render(now);
+    render(now, targetW, targetH) {
+      if (!raf) render(now, targetW, targetH);
     },
     /** 嵌套折射开关：开 = 重叠玻璃逐层合成互相折射；关 = 单目标叠画（更快） */
     get nested() { return nested; },
@@ -754,8 +780,8 @@ export function createLiquidGlass(canvas, opts = {}) {
     stop() { cancelAnimationFrame(raf); raf = 0; },
     dispose() {
       this.stop();
-      for (const t of [bgTex, compTexA, compTexB, blurTexA, blurTexB]) gl.deleteTexture(t);
-      for (const f of [bgFbo, compFboA, compFboB, blurFboA, blurFboB]) gl.deleteFramebuffer(f);
+      for (const t of [bgTex, compTexA, compTexB, blurTexA, blurTexB]) if (t) gl.deleteTexture(t);
+      for (const f of [bgFbo, compFboA, compFboB, blurFboA, blurFboB]) if (f) gl.deleteFramebuffer(f);
       gl.deleteProgram(bgProg);
       gl.deleteProgram(blitProg);
       gl.deleteProgram(glassProg);

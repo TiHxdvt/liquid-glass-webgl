@@ -124,7 +124,7 @@ glass.rects.push({ x: 500, y: 300, w: 360, h: 160, dist: 70 });  // 这块采样
 | `rects` | 玻璃面板数组；顺序 = 堆叠顺序（自后向前）；每项可覆盖任意光学字段 |
 | `rect` | `rects[0]` 的别名（单面板用法） |
 | `nested` | 运行时切换嵌套折射 |
-| `render(now?)` | 外部驱动渲一帧（挂进自有帧循环，与 `stop()` 配套）；内部 rAF 运行期间调用会被忽略 |
+| `render(now?, width?, height?)` | 外部驱动渲一帧（挂进自有帧循环，与 `stop()` 配套）；内部 rAF 运行期间调用会被忽略；可选 width/height 显式指定绘制缓冲尺寸（局部画布/离屏渲染） |
 | `start()` / `stop()` | 内部 rAF 循环开关 |
 | `dispose()` | 释放全部 GL 资源 |
 | `fps` | 最近半秒的实测帧率 |
@@ -136,8 +136,10 @@ glass.rects.push({ x: 500, y: 300, w: 360, h: 160, dist: 70 });  // 这块采样
 1. **着色器背景** — `opts.background` 传全屏片元着色器（见 Quick Start）。
    声明 `uTime` 则逐帧重画（动画背景）；否则仅在尺寸变化后重画（静态背景，
    mipmap 缓存）。
-2. **纹理背景** — `setBackground(src)` 每帧喂任意 `TexImageSource`（canvas /
-   ImageBitmap / video frame…），分辨率可与画布不一致，引擎负责 y 翻转。
+2. **纹理背景** — `setBackground(src, opts?)` 每帧喂任意 `TexImageSource`（canvas /
+   ImageBitmap / video frame…），分辨率可与画布不一致，引擎负责 y 翻转；
+   同尺寸源复用 `texSubImage2D`（免纹理重分配）。若调用方已在合成端翻转好 y，
+   传 `{ preflipped: true }` 可跳过上传期翻转（建议配 `{ alpha: false }` 画布）。
    动画源逐帧调用；`setBackground(null)` 回退着色器背景。
 
 配合 `transparent: true` 可让玻璃浮在真实页面上：画布透明、只画玻璃本体，
