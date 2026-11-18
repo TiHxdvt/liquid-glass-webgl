@@ -4,7 +4,9 @@
 
 **液态玻璃 / liquid glass for WebGL2**
 
-physically-based refraction · single-file · zero-dependency
+screen-space refraction · single-file · zero-dependency
+
+[English guide](README.en.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![WebGL2](https://img.shields.io/badge/WebGL2-%E2%9C%93-success)
@@ -34,10 +36,10 @@ physically-based refraction · single-file · zero-dependency
 
 | | |
 |:---|:---|
-| **真实折射** — 斯涅尔定律驱动的位移场，不是滤镜近似；玻璃拖过色块时边缘环出现**倒像** | **对折位移场** — 采样映射在环内带极小值（对折点），外侧半环倒序成像，对折线弯出缓 U |
-| **Schlick 菲涅尔** — 边缘各边天然比背景略亮，反光颜色取自周边环境而非写死的白 | **玻色**（玻璃自色）— 浅 / 深双模式透过率标定（`tint` = ±1） |
-| **Cauchy 色散** — R/G/B 采样距离微差 | **多块堆叠** — `rects` 数组自后向前合成；开 `nested` 则重叠处上层玻璃**折射下层玻璃**（光学嵌套），关则上层遮挡（更快） |
-| **单文件零依赖** — 一个 `.js`，无构建要求，支持 WebGL2 即可 | **逐帧可调** — 位置、尺寸与全部光学参数逐帧生效，适配动效与交互动画 |
+| **屏幕空间折射** — 圆角矩形的距离场驱动背景重采样，玻璃边缘形成倒像 | **对折位移场** — 外臂采用四分之一椭圆，内臂平滑接回平面，磨砂变化时折线位置固定 |
+| **反光** — 可开启 Schlick 边缘光带观察折线位置 | **玻色** — 浅色与深色模式分别按透过率样本标定 |
+| **RGB 色散** — 三通道具有独立采样偏移 | **多块堆叠** — 逐面板覆盖参数，重叠时可让上层折射下层 |
+| **按需绘制** — 静态画面休眠，着色器动画逐帧更新 | **单文件零依赖** — 直接导入 JS 模块，内含 JSDoc 类型提示 |
 
 ---
 
@@ -63,8 +65,7 @@ physically-based refraction · single-file · zero-dependency
 
 ## Quick Start
 
-ESM 单文件，直接 import 即可——无构建步骤、无依赖；需要 WebGL2（当前所有
-主流浏览器均支持）。
+只需复制并导入 `liquid-glass-webgl.js`。编辑器可从文件内的 JSDoc 补全参数，TypeScript 项目开启 `allowJs` 即可读取这些类型。
 
 ```js
 import { createLiquidGlass } from './liquid-glass-webgl.js';
@@ -104,8 +105,6 @@ glass.rects.push({ x: 500, y: 300, w: 360, h: 160, dist: 70 });  // 这块采样
 
 ---
 
----
-
 ## API
 
 ### createLiquidGlass(canvas, opts?)
@@ -125,28 +124,39 @@ glass.rects.push({ x: 500, y: 300, w: 360, h: 160, dist: 70 });  // 这块采样
 | `rect` | `rects[0]` 的别名（单面板用法） |
 | `nested` | 运行时切换嵌套折射 |
 | `render(now?, width?, height?)` | 外部驱动渲一帧（挂进自有帧循环，与 `stop()` 配套）；内部 rAF 运行期间调用会被忽略；可选 width/height 显式指定绘制缓冲尺寸（局部画布/离屏渲染） |
-| `start()` / `stop()` | 内部 rAF 循环开关 |
+| `start()` / `stop()` | 启停内部调度。默认每帧检查公开参数与面板数值，静止时跳过所有 GL 绘制 |
+| `start({ onDemand: true })` | 事件驱动调度。静态画面绘制后暂停 rAF，适合 UI 面板或视频帧回调 |
+| `invalidate()` | 通知内部调度器重新绘制；同帧多次调用合并。事件驱动模式下，直接改写 `params` 或 `rects` 后调用 |
 | `dispose()` | 释放全部 GL 资源 |
-| `fps` | 最近半秒的实测帧率 |
+| `fps` | 最近一个采样窗口的实际绘制帧率，空闲后回到 0 |
 
 ### 背景注入
 
-两条路，二选一：
+着色器背景通过 `opts.background` 注入。使用了 `uniform float uTime` 的着色器随时间重画，静态着色器在尺寸变化或切回时重画。
 
-1. **着色器背景** — `opts.background` 传全屏片元着色器（见 Quick Start）。
-   声明 `uTime` 则逐帧重画（动画背景）；否则仅在尺寸变化后重画（静态背景，
-   mipmap 缓存）。
-2. **纹理背景** — `setBackground(src, opts?)` 每帧喂任意 `TexImageSource`（canvas /
-   ImageBitmap / video frame…），分辨率可与画布不一致，引擎负责 y 翻转；
-   同尺寸源复用 `texSubImage2D`（免纹理重分配）。若调用方已在合成端翻转好 y，
-   传 `{ preflipped: true }` 可跳过上传期翻转（建议配 `{ alpha: false }` 画布）。
-   动画源逐帧调用；`setBackground(null)` 回退着色器背景。
+`setBackground(src, options?)` 接受 canvas、图片、视频、ImageBitmap 等像素源，源分辨率可与显示画布不同。静态图片上传一次即可。可变源每次提交都更新，同尺寸复用纹理存储。传入 `{ version }` 时，相同源、尺寸、翻转方向与版本会复用上次上传。若源已完成 Y 翻转，可传 `{ preflipped: true }`。`setBackground(null)` 切回着色器背景。
 
-配合 `transparent: true` 可让玻璃浮在真实页面上：画布透明、只画玻璃本体，
-折射采样来自 setBackground 喂入的下方画面。
+```js
+glass.start({ onDemand: true });
 
-> **性能** — 默认走单目标叠画快路径；`nested` 仅在包围盒相交时才逐层合成；
-> 磨砂预模糊按各玻璃的包围盒局部计算。合成成本与面板数、重叠面积线性相关。
+slider.addEventListener('input', () => {
+  glass.params.blur = Number(slider.value);
+  glass.invalidate();
+});
+
+// video 为已开始播放、支持视频帧回调的 HTMLVideoElement。
+function onVideoFrame() {
+  glass.setBackground(video);
+  video.requestVideoFrameCallback(onVideoFrame);
+}
+video.requestVideoFrameCallback(onVideoFrame);
+```
+
+`setBackground`、`nested`、画布 CSS 尺寸和设备像素比的变化会自动唤醒内部调度。手动调用 `render(now, width, height)` 可直接指定绘制分辨率；省略尺寸时按 CSS 尺寸与设备像素比计算，像素比上限为 2。
+
+**缓存与显存**　磨砂在玻璃覆盖区及采样边界内以设备分辨率计算。只改玻色会复用卷积结果；背景、磨砂半径、采样范围或下层合成变化时，相应缓存失效。多块面板共享横向卷积工作纹理，最终磨砂缓存总面积至多一张画布。需要嵌套折射时才分配层间纹理，两块相交面板仅需一张。
+
+**页面集成**　透明模式只绘制玻璃，实际 DOM 背景由页面显示，折射所需的像素由调用方提供。上下文恢复后引擎会重建 GPU 资源并重绘；使用已关闭的 ImageBitmap 或 VideoFrame 时，接入方需提交新的可读帧。demo 在缺少 WebGL2 时显示 CSS 磨砂预览。[DOM 元素跟踪示例](README.en.md#tracking-a-dom-element)
 
 ---
 
@@ -159,7 +169,7 @@ glass.rects.push({ x: 500, y: 300, w: 360, h: 160, dist: 70 });  // 这块采样
 | 采样距离 | `dist` | 50 | 边缘最大位移——玻璃拖入色块时「异色被拉进来」的距离 |
 | 倒像陡度 | `fold` | 2.6 | 位移衰减幂次；>1 时场内出现对折点（倒像） |
 | 软弯倍率 | `bend` | 3 | 折返点曲率半径的放大系数 |
-| 玻璃下磨砂 | `blur` | 1 | 磨砂 σ（px，CSS `blur()` 同口径） |
+| 玻璃下磨砂 | `blur` | 1 | 高斯 σ（设备像素），最小 0.5；demo 满档 16 即 σ=16 |
 | 玻色 | `tint` | 1 | 玻璃自色：0 纯透明，+1 浅色模式透过率，−1 深色模式透过率 |
 | 色散 | `disp` | 0.5 | R/G/B 采样距离微差 |
 | 边缘反光 | `rim` | 0 | Schlick 高光强度 |
@@ -174,14 +184,14 @@ python3 -m http.server 8000    # 在仓库根目录执行（demo 要引用上级
 # 打开 http://localhost:8000/demo/
 ```
 
-3×3 测试卡（平色 / 网格 / 斑马 / 棋盘 / 光谱条）+ 全参数滑杆 + 拖拽移动玻璃。
+测试卡、纯灰、光斑动画可切换，支持滑杆调参、切换预设和拖动玻璃。通过同一服务打开 `/tests/render.html` 可运行 WebGL 回归用例。
 
 ---
 
 ## How It Works
 
 **核心机制——对折位移场**：边缘环的采样映射是「显示深度 x → 采样深度 s(x)」，
-s 从外缘的采样距离单调递减到内缘的原位，画面倒序成像（倒像）。把玻璃拖进
+s 在外缘至折点间递减，局部画面倒序成像。把玻璃拖进
 色块时「进去的部分显示色块外的颜色、越往里进异色越向边缘挤压拉伸」即由此
 而来：异色带宽度由采样距离决定，收缩方向永远贴边。衰减够陡时 s 在环内出现
 极小值（对折点）——外侧半环倒序，对折处条纹折返。折返顶点是二次曲率拱，
@@ -194,7 +204,7 @@ s 从外缘的采样距离单调递减到内缘的原位，画面倒序成像（
   u 半轴 = 折线深度），内侧臂用曲率缩放保持顶点二次曲率
 - **对折线光带** — 映射斜率 → 0 处的细线
 - **边缘光** — Schlick 近似 + 环境取色 + 常量底光兜底
-- **色散** — R/G/B 三通道各算位移（Cauchy 型 η(λ)）
+- **色散** — 沿同一法向为 R/G/B 三通道施加不同的采样位移
 - **磨砂** — 分离高斯预模糊纹（σ=blur px，全程线性），均匀作用于折射后的
   画面；折射几何恒定（对折线不随磨砂移动）；位移重采样锯齿靠 RGSS 足迹
   超采样消除（像素足迹在源侧被 |s′| 拉长，铺 4 点覆盖率采样）

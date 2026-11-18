@@ -54,17 +54,27 @@
   .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.07); font-size: 11px; color: #7a8290; }
   .foot .btns { margin-top: 8px; }
   #fps { color: #9fe6a8; font-variant-numeric: tabular-nums; }
+  .fallback { display: none; }
+  .css-fallback { background: repeating-linear-gradient(32deg, #273449 0 16px, #889bb3 16px 32px); }
+  .css-fallback :is(#stage, .panel, .fab) { display: none; }
+  .css-fallback .fallback {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    display: block; max-width: 22rem; padding: 24px; border-radius: 24px;
+    color: white; background: rgba(30, 38, 52, 0.75);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  }
 </style>
 </head>
 <body>
 <canvas id="stage"></canvas>
+<p class="fallback" role="status">当前浏览器使用 CSS 磨砂预览。启用 WebGL2 后可拖动玻璃、查看折射并调整参数。</p>
 <button class="fab" id="fab">⚙ 调参</button>
 <aside class="panel" id="panel">
   <div class="panel-head">
     <h1>liquid-glass-webgl · 液态玻璃</h1>
     <button class="icon-btn" id="collapse" title="收起面板">»</button>
   </div>
-  <div class="sub">物理内核：斯涅尔折射 + Schlick 菲涅尔 + 解析 SDF</div>
+  <div class="sub">屏幕空间折射 · 线性磨砂 · 浅色与深色玻色</div>
 
   <div class="sec">预设</div>
   <div class="btns" id="presets"></div>
@@ -83,10 +93,16 @@
 
   <div class="foot">
     拖拽画布移动玻璃 · <span id="fps">–</span><br />
-    独立实验区，不进产品构建
     <div class="btns"><button id="copy">复制参数</button></div>
   </div>
 </aside>
-<script type="module" src="./demo.js"></script>
+<script type="module">
+  const canvas = document.getElementById('stage');
+  if (canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false })) {
+    await import('./demo.js');
+  } else {
+    document.body.classList.add('css-fallback');
+  }
+</script>
 </body>
 </html>

@@ -117,8 +117,7 @@ const BGS = [
 
 const canvas = document.getElementById('stage');
 
-// ── 引擎实例：换背景 = 整实例重建（bg 着色器在创建时编译定死），
-// 参数与面板摆位跨重建保留 ──
+// 切换背景着色器时保留参数与面板位置。
 let lab;
 function setBg(frag) {
   const savedParams = lab ? { ...lab.params } : null;
@@ -132,7 +131,7 @@ function setBg(frag) {
     lab.rects.length = 0;
     lab.rects.push(...savedRects);
   }
-  lab.start();
+  if (!document.hidden) lab.start({ onDemand: true });
 }
 setBg(TESTCARD_FRAG);
 
@@ -167,7 +166,10 @@ for (const [key, label, min, max, step] of SLIDERS) {
   const val = document.createElement('span');
   val.className = 'val';
   const show = () => { val.textContent = String(lab.params[key]); };
-  row.innerHTML = `<span class="name">${label}</span>`;
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = label;
+  row.appendChild(name);
   const input = document.createElement('input');
   input.type = 'range';
   input.min = min; input.max = max; input.step = step;
@@ -175,6 +177,7 @@ for (const [key, label, min, max, step] of SLIDERS) {
   input.addEventListener('input', () => {
     lab.params[key] = Number(input.value);
     show();
+    lab.invalidate();
   });
   row.appendChild(input);
   row.appendChild(val);
@@ -201,6 +204,7 @@ for (const [name, p] of Object.entries(PRESETS)) {
     Object.assign(lab.params, p);
     syncSliders();
     syncToggles();
+    lab.invalidate();
   });
   presetsEl.appendChild(btn);
 }
@@ -222,6 +226,7 @@ function syncToggles() {
 envBtn.addEventListener('click', () => {
   lab.params.envProj = lab.params.envProj ? 0 : 1;
   syncToggles();
+  lab.invalidate();
 });
 nestBtn.addEventListener('click', () => {
   lab.nested = !lab.nested;
@@ -230,6 +235,7 @@ nestBtn.addEventListener('click', () => {
 rimBtn.addEventListener('click', () => {
   lab.params.rim = lab.params.rim ? 0 : 2;
   syncToggles();
+  lab.invalidate();
 });
 document.getElementById('toggles').append(envBtn, nestBtn, rimBtn);
 syncToggles();
@@ -271,7 +277,10 @@ const panelBtns = [
 for (const [label, fn] of panelBtns) {
   const btn = document.createElement('button');
   btn.textContent = label;
-  btn.addEventListener('click', fn);
+  btn.addEventListener('click', () => {
+    fn();
+    lab.invalidate();
+  });
   panelsEl.appendChild(btn);
 }
 
@@ -317,6 +326,7 @@ canvas.addEventListener('pointermove', (e) => {
   const pt = toStage(e);
   dragging.x = pt.x;
   dragging.y = pt.y;
+  lab.invalidate();
 });
 canvas.addEventListener('pointerup', () => { dragging = null; });
 canvas.addEventListener('pointercancel', () => { dragging = null; });
@@ -338,11 +348,12 @@ function hitPanel(x, y) {
 
 // FPS 显示
 const fpsEl = document.getElementById('fps');
-setInterval(() => { fpsEl.textContent = `${lab.fps.toFixed(0)} fps`; }, 500);
+setInterval(() => {
+  const label = lab.fps > 0 ? Math.round(lab.fps) + ' fps' : '按需绘制';
+  if (fpsEl.textContent !== label) fpsEl.textContent = label;
+}, 500);
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) lab.stop();
-  else lab.start();
+  else lab.start({ onDemand: true });
 });
-
-lab.start();
